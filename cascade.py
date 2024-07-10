@@ -244,6 +244,7 @@ class Sequential_Cascade_Feeder():
         log.info('Working the Queue with len:'+ str(len(self.main_deque)))
         start_time = time.time()
         #Feed the latest image in the Queue through the cascade
+        self.bot.clean_img=self.main_deque[self.fps_offset][1]
         cascade_obj = self.feed(target_img=self.main_deque[self.fps_offset][1], img_name=self.main_deque[self.fps_offset][0])[1]
         #log.info('Runtime:'+ str(time.time() - start_time))
         done_timestamp = datetime.now(tz=ZoneInfo('Europe/Zurich')).strftime("%Y_%m_%d_%H-%M-%S.%f")
@@ -412,12 +413,14 @@ class Sequential_Cascade_Feeder():
                 time.sleep(open_time)
                 self.bot.send_text('Door locked again, back to business...')
 
+            # TODO: remove if firebase flag solution tests sucessfully
             # check if we should export a live image
             if (last_run_time+10 < current_time):
                 last_run_time=current_time
                 liveImageThread=Thread(target=self.bot.sendLiveImage, daemon=True)
                 liveImageThread.start()
                 #self.bot.sendLiveImage()
+            # TODO: remove until here
 
     def dummy_queque_handler(self):
         # Do this to force run all networks s.t. the network inference time stabilizes
@@ -759,11 +762,60 @@ class NodeBot():
         self.node_last_casc_img = None
         self.node_over_head_info = None
         self.node_let_in_flag = None
+        self.clean_img = None
 
         #Init firebase
         self.init_firebase_messaging()
         #Init the listener
         self.init_bot_listener()
+
+    def firebase_current_image_listener(self,event):
+        #print(event.event_type)  # Indicates the type of the event done
+        #print(event.path)  # References the path of the event
+        log.info("curennt image: Data was: "+str(event.data))  # Gives the UPDATED DATA, None if deleted
+        #print("Data was: "+str(event.data))  # Gives the UPDATED DATA, None if deleted
+        #print(event.data)
+
+        # Now, executing specific functions based on the new data(UPDATED DATA)
+        key=event.path.replace("/","")
+        if (key!="") and (event.data!=None) :
+        #if str(event.data) == 'hello':
+            log.info('current image: Data in database updated:')
+            log.info('current image: key: '+key)
+
+            #log.info( str(event.data))
+            # self.sendLiveImage()
+            # TODO: remove if we use sendLiveImage function
+            timestamp_string=datetime.now(tz=ZoneInfo('Europe/Zurich')).strftime("%d.%m.%Y %H:%M:%S")
+            live_filename=self.livePrefix+timestamp_string+'.jpg'
+            try:
+                # delete old images from firebase storage
+                log.info('current image: Deleting old images from firebase storage')
+                oldblobs = self.bucket.list_blobs(prefix=self.livePrefix)
+                for oldblob in oldblobs:
+                    log.info(oldblob)
+                    oldblob.delete()
+                # write live file
+                cv2.imwrite(live_filename, self.node_live_img)
+                # send it
+                self.sendPushNotification("current image","current image",live_filename,timestamp_string,"1")
+                log.info("current image: "+live_filename+", "+timestamp_string)
+                # alternative: store values in database
+                imgUrl= self.uploadImage(live_filename)
+                if imgUrl!="":
+                    self.dbref.child("current_result").child(key).set({"url":live_filename, "timestamp": timestamp_string})
+            except cv2.error as e:
+                log.info("writing live img failed:")
+                log.info(e)
+            # TODO: remove until here
+
+        elif event.data == None:
+            # in case flag was removed by client app
+            log.info('current image: Data in database has been deleted')
+            # means we should delete result, since removal of flag is only carried
+            # out after result is read
+            if (key!=""):
+                self.dbref.child("current_result/"+key).delete()
 
     def init_firebase_messaging(self):
         # initialize firebase messaging
@@ -790,6 +842,15 @@ class NodeBot():
                 log.info('failed to delete '+blob)
                 log.info(e)
         self.dbref=db.reference('/')
+        # remove old calls and old results for current images
+        self.dbref.child('current').delete()
+        self.dbref.child('current_result').delete()
+
+        # initialize db flag listener for sending live (current) images
+        self.dbref.child('current').listen(self.firebase_current_image_listener)
+        # It calls the above listener method
+        # (It continuosly listens for the data changes database)
+        # images reference in firebas database
         self.images_ref=self.dbref.child('images')
 
 
@@ -1010,8 +1071,6 @@ class NodeBot():
         try:
             my_resul = cv2.imwrite(imgfilename,image)
             # save curremt live image for future model training
-            if self.node_live_img is not None:
-                my_resul = cv2.imwrite("clean_image_detect"+timestamp_string+".jpg",self.node_live_img)
         except cv2.error as e:
             log.info("writing detection image failed:")
             log.info(e)
@@ -1024,12 +1083,16 @@ class NodeBot():
         last_casc_filename=self.cascPrefix+timestamp_string+'.jpg'
         try:
             my_resul = cv2.imwrite(last_casc_filename,self.node_last_casc_img)
+            if self.clean_img is not None:
+                my_resul = cv2.imwrite("clean_image_detect"+timestamp_string+".jpg",self.clean_img)
         except cv2.error as e:
             log.info("writing last cascade image failed:")
             log.info(e)
             return
         self.sendPushNotification("Latest detection result", "detection result", last_casc_filename, timestamp_string,"0")
 
+    # TODO: remove this function after database flag solution tests successfully
+    # or rewrite to just send image
     def sendLiveImage(self):
         log.info("checking for firebase file")
         blob=self.bucket.blob('settings.txt')
@@ -1056,6 +1119,7 @@ class NodeBot():
             #        log.info("writing last casc img failed:")
             #        log.info(e)
             #else:
+            # TODO: remove until here (in case we keep function), and remove indentation (4 spaces)
             try:
                 # delete old images from firebase storage
                 log.info('Deleting old images from firebase storage')
@@ -1065,9 +1129,14 @@ class NodeBot():
                     oldblob.delete()
                 # write live file
                 cv2.imwrite(live_filename, self.node_live_img)
-                # send it
+                # send it TODO: deactivate following line if we use firebase database 
                 self.sendPushNotification("current image","current image",live_filename,timestamp_string,"1")
-                blob.delete()
+                log.info("current image: "+live_filename+", "+timestamp_string)
+                # alternative: store values in database TODO: activate if we keep function
+                #imgUrl = self.uploadImage(live_filename)
+                #if imgUrl! = "":
+                #    self.dbref.child("current_result").child(key).set({"url":live_filename, "timestamp": timestamp_string})
+                blob.delete() # TODO: remove this line if we keep function
             except cv2.error as e:
                 log.info("writing live img failed:")
                 log.info(e)
